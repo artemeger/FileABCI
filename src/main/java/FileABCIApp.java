@@ -1,40 +1,24 @@
-import com.github.jtendermint.jabci.api.ABCIAPI;
-import com.github.jtendermint.jabci.api.CodeType;
+import classes.Transaction;
+import com.github.jtendermint.jabci.api.*;
 import com.github.jtendermint.jabci.socket.ConnectionListener;
 import com.github.jtendermint.jabci.socket.TSocket;
-import com.github.jtendermint.jabci.types.RequestBeginBlock;
-import com.github.jtendermint.jabci.types.RequestCheckTx;
-import com.github.jtendermint.jabci.types.RequestCommit;
-import com.github.jtendermint.jabci.types.RequestDeliverTx;
-import com.github.jtendermint.jabci.types.RequestEcho;
-import com.github.jtendermint.jabci.types.RequestEndBlock;
-import com.github.jtendermint.jabci.types.RequestFlush;
-import com.github.jtendermint.jabci.types.RequestInfo;
-import com.github.jtendermint.jabci.types.RequestInitChain;
-import com.github.jtendermint.jabci.types.RequestQuery;
-import com.github.jtendermint.jabci.types.RequestSetOption;
-import com.github.jtendermint.jabci.types.ResponseBeginBlock;
-import com.github.jtendermint.jabci.types.ResponseCheckTx;
-import com.github.jtendermint.jabci.types.ResponseCommit;
-import com.github.jtendermint.jabci.types.ResponseDeliverTx;
-import com.github.jtendermint.jabci.types.ResponseEcho;
-import com.github.jtendermint.jabci.types.ResponseEndBlock;
-import com.github.jtendermint.jabci.types.ResponseFlush;
-import com.github.jtendermint.jabci.types.ResponseInfo;
-import com.github.jtendermint.jabci.types.ResponseInitChain;
-import com.github.jtendermint.jabci.types.ResponseQuery;
-import com.github.jtendermint.jabci.types.ResponseSetOption;
+import com.github.jtendermint.jabci.types.*;
 import com.google.protobuf.ByteString;
-import java.util.HashMap;
+
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import com.google.gson.Gson;
 
 import crypto.RipeMD160;
 import data.AppState;
 
+import javax.xml.bind.DatatypeConverter;
 
-public class FileABCIApp implements ABCIAPI {
+
+public class FileABCIApp implements IBeginBlock, ICheckTx, ICommit, IInfo, IDeliverTx, IQuery, IEndBlock {
 
     private static final Logger LOG = Logger.getLogger(FileABCIApp.class.getName());
     private ByteString appState;
@@ -46,15 +30,10 @@ public class FileABCIApp implements ABCIAPI {
         currentHeight = 0L;
 
         if(AppState.exists()){
-            HashMap<String, Object> nodeState;
-            nodeState = AppState.loadAppState();
-            appState = (ByteString) nodeState.get(AppState.KEYAPP);
-            LOG.log(Level.INFO, "APPP: " + appState);
-            currentHeight = (Long) nodeState.get(AppState.KEYHEIGHT);
-            LOG.log(Level.INFO, "HEIGHT: " + currentHeight);
-        } else {
-            updateAppState(appState);
-        }
+            appState = (ByteString) AppState.loadAppState().get(AppState.KEYAPP);
+            currentHeight = (Long)  AppState.loadAppState().get(AppState.KEYHEIGHT);
+            System.out.println(appState.toStringUtf8());
+        } else AppState.saveAppState(appState, currentHeight);
 
         TSocket socket = new TSocket((exception, event) -> {}, listener, (name, remaining) -> {});
         socket.registerListener(this);
@@ -73,8 +52,14 @@ public class FileABCIApp implements ABCIAPI {
     @Override
     public ResponseBeginBlock requestBeginBlock(RequestBeginBlock requestBeginBlock) {
         LOG.log(Level.INFO, "Begin Block: " + requestBeginBlock.getHash());
-        appState = loadAppState();
-        updateHeight(requestBeginBlock.getHeader().getHeight());
+        currentHeight = requestBeginBlock.getHeader().getHeight();
+        if(requestBeginBlock.getHeader().getNumTxs() != 0){
+            try {
+                appState =  RipeMD160.getHashFromBytes(appState);
+            } catch (NoSuchAlgorithmException e) {
+                e.printStackTrace();
+            }
+        }
         return ResponseBeginBlock.newBuilder().build();
     }
 
@@ -85,30 +70,19 @@ public class FileABCIApp implements ABCIAPI {
     }
 
     @Override
-    public ResponseCommit requestCommit(RequestCommit requestCommit) {
-        LOG.log(Level.INFO, "Commit");
-        LOG.log(Level.INFO, "NOW APP:"+appState.toStringUtf8());
-        ResponseCommit.Builder builder = ResponseCommit.newBuilder();
-        try{
-            builder.setData(RipeMD160.getHashFromBytes(appState));
-            updateAppState(RipeMD160.getHashFromBytes(appState));
-            LOG.log(Level.INFO, "THEN APP:"+appState.toStringUtf8());
-        } catch (Exception e) {
-            LOG.log(Level.INFO, "Bad Commit: " + e.getMessage());
-        }
-        return builder.build();
-    }
-
-    @Override
     public ResponseDeliverTx receivedDeliverTx(RequestDeliverTx requestDeliverTx) {
         LOG.log(Level.INFO, "Deliver tx: " + requestDeliverTx.getTx());
-        return ResponseDeliverTx.newBuilder().setCode(CodeType.OK).build();
-    }
-
-    @Override
-    public ResponseEcho requestEcho(RequestEcho requestEcho) {
-        LOG.log(Level.INFO, "Echo: " + requestEcho.getMessage());
-        return ResponseEcho.newBuilder().setMessage(requestEcho.getMessage()).build();
+        ResponseDeliverTx.Builder builder = ResponseDeliverTx.newBuilder();
+        byte[] base64Decoded = DatatypeConverter.parseBase64Binary(requestDeliverTx.getTx().toStringUtf8());
+        Gson gson = new Gson();
+        Transaction trans = gson.fromJson(new String(base64Decoded) , Transaction.class);
+        if(trans.getOwner() != null) {
+            KVPair.Builder kvbuilder = KVPair.newBuilder();
+            kvbuilder.setKey(ByteString.copyFromUtf8("account.owner"));
+            kvbuilder.setValue(ByteString.copyFromUtf8(trans.getOwner()));
+            builder.setTags(0, kvbuilder.build());
+        }
+        return builder.setCode(CodeType.OK).build();
     }
 
     @Override
@@ -118,9 +92,16 @@ public class FileABCIApp implements ABCIAPI {
     }
 
     @Override
-    public ResponseFlush requestFlush(RequestFlush requestFlush) {
-        LOG.log(Level.INFO, "Flush");
-        return ResponseFlush.newBuilder().build();
+    public ResponseCommit requestCommit(RequestCommit requestCommit) {
+        LOG.log(Level.INFO, "Commit");
+        ResponseCommit.Builder builder = ResponseCommit.newBuilder();
+        try{
+            builder.setData(appState);
+            AppState.saveAppState(appState, currentHeight);
+        } catch (Exception e) {
+            LOG.log(Level.INFO, "Bad Commit: " + e.getMessage());
+        }
+        return builder.build();
     }
 
     @Override
@@ -133,33 +114,9 @@ public class FileABCIApp implements ABCIAPI {
     }
 
     @Override
-    public ResponseInitChain requestInitChain(RequestInitChain requestInitChain) {
-        LOG.log(Level.INFO, "Init Chain");
-        return ResponseInitChain.newBuilder().build();
-    }
-
-    @Override
     public ResponseQuery requestQuery(RequestQuery requestQuery) {
         LOG.log(Level.INFO, "Query: " + requestQuery.getData());
         return ResponseQuery.newBuilder().build();
     }
 
-    @Override
-    public ResponseSetOption requestSetOption(RequestSetOption requestSetOption) {
-        LOG.log(Level.INFO, "Set Option: " + requestSetOption.getKey());
-        return ResponseSetOption.newBuilder().build();
-    }
-
-    private void updateAppState(ByteString newState){
-        appState = newState;
-        AppState.saveAppState(appState, currentHeight);
-    }
-
-    private void updateHeight(long height){
-        currentHeight = height;
-        AppState.saveAppState(appState, currentHeight);
-    }
-    private ByteString loadAppState(){
-        return (ByteString) AppState.loadAppState().get(AppState.KEYAPP);
-    }
 }
